@@ -1,0 +1,201 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Sign Up - MyPortal</title>
+    <link href="https://cdn.jsdelivr.net/npm/tailwindcss@2.2.19/dist/tailwind.min.css" rel="stylesheet">
+    <script src="https://www.gstatic.com/firebasejs/9.6.1/firebase-app-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/9.6.1/firebase-auth-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/9.6.1/firebase-firestore-compat.js"></script>
+    <script>
+        // Initialize Firebase
+        var firebaseConfig = {
+            apiKey: "YOUR_FIREBASE_API_KEY",
+            authDomain: "YOUR_FIREBASE_AUTH_DOMAIN",
+            projectId: "YOUR_FIREBASE_PROJECT_ID",
+            storageBucket: "YOUR_FIREBASE_STORAGE_BUCKET",
+            messagingSenderId: "YOUR_FIREBASE_MESSAGING_SENDER_ID",
+            appId: "YOUR_FIREBASE_APP_ID"
+        };
+        firebase.initializeApp(firebaseConfig);
+
+        function signUpWithRoblox() {
+            const clientId = 'YOUR_ROBLOX_CLIENT_ID';
+            const redirectUri = 'https://auth.skylox.org/sign-up';
+            const state = generateState('signup');
+
+            localStorage.setItem('oauthState', state);
+
+            const authorizationUrl = `https://apis.roblox.com/oauth/v1/authorize?response_type=code&client_id=${clientId}&redirect_uri=${encodeURIComponent(redirectUri)}&state=${state}&scope=openid%20profile`;
+
+            window.location.href = authorizationUrl;
+        }
+
+        function generateState(flow) {
+            return `${Math.random().toString(36).substring(2)}|${flow}`;
+        }
+
+        function handleOAuthCallback() {
+            const urlParams = new URLSearchParams(window.location.search);
+            const code = urlParams.get('code');
+            const state = urlParams.get('state');
+            const storedState = localStorage.getItem('oauthState');
+
+            if (!state || state.split('|')[0] !== storedState.split('|')[0]) {
+                alert('Invalid state parameter');
+                return;
+            }
+
+            const flow = state.split('|')[1];
+            exchangeCodeForToken(code, flow);
+        }
+
+        async function getClientSecret() {
+            const response = await fetch('get_client_secret.php');
+            if (!response.ok) {
+                throw new Error(`HTTP error! status: ${response.status}`);
+            }
+            const data = await response.json();
+            return data.clientSecret;
+        }
+
+        async function exchangeCodeForToken(code, flow) {
+            const tokenUrl = 'https://apis.roblox.com/oauth/v1/token';
+            const clientId = 'YOUR_ROBLOX_CLIENT_ID';
+            const clientSecret = await getClientSecret();
+            const redirectUri = 'https://auth.skylox.org/sign-up';
+
+            fetch(tokenUrl, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                body: new URLSearchParams({
+                    grant_type: 'authorization_code',
+                    code: code,
+                    redirect_uri: redirectUri,
+                    client_id: clientId,
+                    client_secret: clientSecret
+                }).toString()
+            })
+            .then(response => {
+                if (!response.ok) {
+                    throw new Error(`HTTP error! status: ${response.status}`);
+                }
+                return response.json();
+            })
+            .then(data => {
+                if (data.access_token) {
+                    fetchUserInfo(data.access_token, flow);
+                } else {
+                    alert('Failed to obtain access token');
+                }
+            })
+            .catch(error => console.error('Error exchanging token:', error));
+        }
+
+        function fetchUserInfo(accessToken, flow) {
+            fetch('https://apis.roblox.com/oauth/v1/userinfo', {
+                headers: { 'Authorization': `Bearer ${accessToken}` }
+            })
+            .then(response => response.json())
+            .then(userInfo => {
+                authenticateAnonymously(userInfo, flow);
+            })
+            .catch(error => console.error('Error fetching user info:', error));
+        }
+
+        function authenticateAnonymously(userInfo, flow) {
+            firebase.auth().signInAnonymously()
+            .then(() => {
+                firebase.auth().onAuthStateChanged((user) => {
+                    if (user) {
+                        saveUserToFirebase(user.uid, userInfo, flow);
+                    } else {
+                        alert('User is not authenticated. Please sign in first.');
+                    }
+                });
+            })
+            .catch(error => {
+                alert("Error signing in anonymously: " + error.message);
+            });
+        }
+
+        function saveUserToFirebase(uid, userInfo, flow) {
+            const userRef = firebase.firestore().collection('users').doc(uid);
+
+            userRef.get()
+            .then(doc => {
+                if (doc.exists) {
+                    return userRef.update({
+                        lastSignIn: firebase.firestore.FieldValue.serverTimestamp()
+                    });
+                } else {
+                    const additionalUserData = {
+                        uniqueID: generateSixDigitID(),
+                        region: userInfo.locale || 'unknown',
+                        firstName: userInfo.given_name || '',
+                        lastName: userInfo.family_name || '',
+                        dob: userInfo.birthdate || '',
+                        gender: userInfo.gender || '',
+                        robloxId: userInfo.sub,
+                        robloxUsername: userInfo.preferred_username,
+                        createdAt: firebase.firestore.FieldValue.serverTimestamp()
+                    };
+                    return userRef.set(additionalUserData);
+                }
+            })
+            .then(() => {
+                const token = generateToken();
+                const expirationDate = new Date();
+                expirationDate.setDate(expirationDate.getDate() + 10);
+
+                return firebase.firestore().collection('tokens').doc(token).set({
+                    token,
+                    expirationDate,
+                    used: false,
+                    uid: uid
+                }).then(() => {
+                    window.location.href = `https://myportal.skylox.org/?token=${token}`;
+                });
+            })
+            .catch(error => console.error('Error saving user to Firestore:', error));
+        }
+
+        function generateSixDigitID() {
+            return Math.floor(100000 + Math.random() * 900000).toString();
+        }
+
+        function generateToken() {
+            return 'xxxx-xxxx-4xxx-yxxx-xxxx'.replace(/[xy]/g, function (c) {
+                var r = Math.random() * 16 | 0, v = c === 'x' ? r : (r & 0x3 | 0x8);
+                return v.toString(16);
+            });
+        }
+
+        if (window.location.search.includes('code')) {
+            handleOAuthCallback();
+        }
+    </script>
+</head>
+
+<body class="flex items-center justify-center min-h-screen bg-cover bg-center" style="background-image: url('cdn/bg.png');">
+    <div class="bg-white rounded-lg p-8 shadow-lg max-w-md w-full m-8">
+        <div class="text-center mb-8">
+            <img src="cdn/myportal.png" alt="MyPortal by SkyLox" class="mx-auto w-48 md:w-56">
+        </div>
+        <div class="text-center mb-8">
+            <h2 class="text-2xl font-semibold mb-4">Welcome to MyPortal</h2>
+            <p class="text-gray-600">Sign up to access exclusive content and features. Use your Roblox account to get started quickly and securely.</p>
+        </div>
+        <div class="text-center mt-6">
+            <button class="w-full bg-blue-500 text-white py-3 rounded-md flex items-center justify-center text-lg hover:bg-blue-600 focus:outline-none focus:ring-2 focus:ring-blue-400" onclick="signUpWithRoblox()">
+                <img src="cdn/roblox.png" alt="Roblox Logo" class="w-6 mr-2">
+                Sign Up with Roblox
+            </button>
+        </div>
+        <div class="text-center mt-8">
+            <p>Already have an account? <a href="sign-in.html" class="text-blue-500">Sign in</a></p>
+        </div>
+    </div>
+</body
+</html>
