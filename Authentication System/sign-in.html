@@ -1,0 +1,249 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Sign In - MyPortal</title>
+    <link href="https://cdn.jsdelivr.net/npm/tailwindcss@2.2.19/dist/tailwind.min.css" rel="stylesheet">
+    <script src="https://www.gstatic.com/firebasejs/9.6.1/firebase-app-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/9.6.1/firebase-auth-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/9.6.1/firebase-firestore-compat.js"></script>
+    <script>
+        // Firebase configuration and initialization
+        const firebaseConfig = {
+            apiKey: "YOUR_FIREBASE_API_KEY",
+            authDomain: "YOUR_FIREBASE_AUTH_DOMAIN",
+            projectId: "YOUR_FIREBASE_PROJECT_ID",
+            storageBucket: "YOUR_FIREBASE_STORAGE_BUCKET",
+            messagingSenderId: "YOUR_FIREBASE_MESSAGING_SENDER_ID",
+            appId: "YOUR_FIREBASE_APP_ID"
+        };
+
+        firebase.initializeApp(firebaseConfig);
+        const auth = firebase.auth();
+        const db = firebase.firestore();
+
+        function signInWithEmail(event) {
+            event.preventDefault();
+            const email = document.getElementById('email').value;
+            const password = document.getElementById('password').value;
+
+            auth.signInWithEmailAndPassword(email, password)
+                .then(userCredential => {
+                    // Generate a one-time token and store it in Firestore
+                    const token = generateToken();
+                    const expirationDate = new Date();
+                    expirationDate.setDate(expirationDate.getDate() + 5);
+
+                    db.collection('tokens').doc(token).set({
+                        token,
+                        expirationDate,
+                        used: false,
+                        uid: userCredential.user.uid
+                    });
+
+                    window.location.href = `https://myportal.skylox.org/?token=${token}`;
+                })
+                .catch(error => {
+                    console.error("Error signing in:", error);
+                    alert("Error signing in: " + error.message);
+                });
+        }
+
+        function signInWithRoblox() {
+            const clientId = 'YOUR_ROBLOX_CLIENT_ID';
+            const redirectUri = 'https://auth.skylox.org/sign-in';
+            const state = generateState('signin');
+
+            localStorage.setItem('oauthState', state);
+            const authorizationUrl = `https://apis.roblox.com/oauth/v1/authorize?response_type=code&client_id=${clientId}&redirect_uri=${encodeURIComponent(redirectUri)}&state=${state}&scope=openid%20profile`;
+
+            window.location.href = authorizationUrl;
+        }
+
+        function generateState(flow) {
+            return `${Math.random().toString(36).substring(2)}|${flow}`;
+        }
+
+        function handleOAuthCallback() {
+            const urlParams = new URLSearchParams(window.location.search);
+            const code = urlParams.get('code');
+            const state = urlParams.get('state');
+            const storedState = localStorage.getItem('oauthState');
+
+            console.log("OAuth Callback:", { code, state, storedState });
+
+            if (!state || state.split('|')[0] !== storedState.split('|')[0]) {
+                alert('Invalid state parameter');
+                return;
+            }
+
+            const flow = state.split('|')[1];
+            exchangeCodeForToken(code, flow);
+        }
+
+        async function getClientSecret() {
+            const response = await fetch('get_client_secret.php');
+            if (!response.ok) {
+                throw new Error(`HTTP error! status: ${response.status}`);
+            }
+            const data = await response.json();
+            return data.clientSecret;
+        }
+
+        async function exchangeCodeForToken(code, flow) {
+            const tokenUrl = 'https://apis.roblox.com/oauth/v1/token';
+            const clientId = 'YOUR_ROBLOX_CLIENT_ID';
+            const clientSecret = await getClientSecret();
+            const redirectUri = 'https://auth.skylox.org/sign-in';
+
+            fetch(tokenUrl, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                body: new URLSearchParams({
+                    grant_type: 'authorization_code',
+                    code: code,
+                    redirect_uri: redirectUri,
+                    client_id: clientId,
+                    client_secret: clientSecret
+                }).toString()
+            })
+            .then(response => {
+                if (!response.ok) {
+                    throw new Error(`HTTP error! status: ${response.status}`);
+                }
+                return response.json();
+            })
+            .then(data => {
+                console.log("Token Exchange Response:", data);
+                if (data.access_token) {
+                    fetchUserInfo(data.access_token, flow);
+                } else {
+                    console.error('Failed to obtain access token');
+                    alert('Failed to obtain access token');
+                }
+            })
+            .catch(error => console.error('Error exchanging token:', error));
+        }
+
+        function fetchUserInfo(accessToken, flow) {
+            fetch('https://apis.roblox.com/oauth/v1/userinfo', {
+                headers: { 'Authorization': `Bearer ${accessToken}` }
+            })
+            .then(response => response.json())
+            .then(userInfo => {
+                console.log('User Info:', userInfo);
+                authenticateAnonymously(userInfo, flow);
+            })
+            .catch(error => console.error('Error fetching user info:', error));
+        }
+
+        function authenticateAnonymously(userInfo, flow) {
+            auth.signInAnonymously().then(() => {
+                auth.onAuthStateChanged((user) => {
+                    if (user) {
+                        console.log("User is authenticated:", user);
+                        saveUserToFirebase(user.uid, userInfo, flow);
+                    } else {
+                        console.error("User is not authenticated");
+                        alert('User is not authenticated. Please sign in first.');
+                    }
+                });
+            }).catch(error => {
+                console.error("Error signing in anonymously:", error);
+                alert("Error signing in anonymously: " + error.message);
+            });
+        }
+
+        function saveUserToFirebase(uid, userInfo, flow) {
+            console.log('Saving user to Firestore:', uid, userInfo);
+
+            const userRef = firebase.firestore().collection('users').doc(uid);
+
+            userRef.get()
+            .then(doc => {
+                console.log('User document fetched:', doc.exists);
+
+                if (doc.exists) {
+                    return userRef.update({
+                        lastSignIn: firebase.firestore.FieldValue.serverTimestamp()
+                    });
+                } else {
+                    const additionalUserData = {
+                        uniqueID: generateSixDigitID(),
+                        region: userInfo.locale || 'unknown',
+                        firstName: userInfo.given_name || '',
+                        lastName: userInfo.family_name || '',
+                        dob: userInfo.birthdate || '',
+                        gender: userInfo.gender || '',
+                        robloxId: userInfo.sub,
+                        robloxUsername: userInfo.preferred_username,
+                        createdAt: firebase.firestore.FieldValue.serverTimestamp()
+                    };
+                    return userRef.set(additionalUserData);
+                }
+            })
+            .then(() => {
+                console.log('User document saved/updated successfully');
+                const token = generateToken();
+                const expirationDate = new Date();
+                expirationDate.setDate(expirationDate.getDate() + 10);
+
+                return firebase.firestore().collection('tokens').doc(token).set({
+                    token,
+                    expirationDate,
+                    used: false,
+                    uid: uid
+                }).then(() => {
+                    console.log('Token saved successfully');
+                    window.location.href = `https://myportal.skylox.org/?token=${token}`;
+                });
+            })
+            .catch(error => console.error('Error saving user to Firestore:', error));
+        }
+
+        function generateSixDigitID() {
+            return Math.floor(100000 + Math.random() * 900000).toString();
+        }
+
+        function generateToken() {
+            return 'xxxx-xxxx-4xxx-yxxx-xxxx'.replace(/[xy]/g, function(c) {
+                var r = Math.random() * 16 | 0, v = c === 'x' ? r : (r & 0x3 | 0x8);
+                return v.toString(16);
+            });
+        }
+
+        if (window.location.search.includes('code')) {
+            handleOAuthCallback();
+        }
+    </script>
+</head>
+<body class="flex items-center justify-center min-h-screen bg-cover bg-center" style="background-image: url('cdn/bg.png');">
+    <div class="bg-white rounded-lg p-8 shadow-lg max-w-md w-full m-8">
+        <div class="text-center mb-8">
+            <img src="cdn/myportal.png" alt="MyPortal by SkyLox" class="mx-auto w-48 md:w-56">
+        </div>
+        <form onsubmit="signInWithEmail(event)">
+            <div class="mb-6">
+                <input type="email" id="email" placeholder="Email" class="w-full px-4 py-3 border rounded-md focus:outline-none focus:ring-2 focus:ring-blue-400">
+            </div>
+            <div class="mb-6">
+                <input type="password" id="password" placeholder="Password" class="w-full px-4 py-3 border rounded-md focus:outline-none focus:ring-2 focus:ring-blue-400">
+            </div>
+            <button type="submit" class="w-full bg-blue-500 text-white py-3 rounded-md text-lg hover:bg-blue-600 focus:outline-none focus:ring-2 focus:ring-blue-400">Sign In</button>
+        </form>
+        <div class="text-center mt-8">
+            <hr class="mb-4">
+            <p class="mb-4">Other</p>
+            <button class="w-full bg-blue-500 text-white py-3 rounded-md flex items-center justify-center text-lg hover:bg-blue-600 focus:outline-none focus:ring-2 focus:ring-blue-400" onclick="signInWithRoblox()">
+                <img src="cdn/roblox.png" alt="Roblox Logo" class="w-6 mr-2">
+                Sign In with Roblox
+            </button>
+        </div>
+        <div class="text-center mt-8">
+            <p>Don’t have an account? <a href="sign-up.html" class="text-blue-500">Sign up</a></p>
+            <p><a href="forgot-password.html" class="text-blue-500">Forgot password?</a></p>
+        </div>
+    </div>
+</body>
+</html>
